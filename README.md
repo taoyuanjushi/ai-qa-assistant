@@ -7,9 +7,11 @@
 - 前端聊天页面：输入消息、发送请求、展示用户消息和 AI 回复。
 - 后端健康检查：`GET /api/health`。
 - 后端聊天接口：`POST /api/chat`。
+- 后端流式聊天接口：`POST /api/chat/stream`。
+- 历史会话接口：`GET /api/conversations`、`GET /api/conversations/{conversation_id}/messages`。
 - 大模型调用：从 `.env` 读取 API Key、Base URL 和模型名称。
 - SQLite 存储：保存 conversation 和 message。
-- CORS：允许前端 `http://localhost:5173` 访问后端。
+- CORS：允许前端 `http://localhost:5173` 访问后端，并暴露 `X-Conversation-Id` 响应头。
 
 ## 技术栈
 
@@ -39,6 +41,7 @@ ai-qa-assistant/
       main.py
       api/
         chat.py
+        conversation.py
       core/
         config.py
         prompt.py
@@ -46,8 +49,10 @@ ai-qa-assistant/
         database.py
       schemas/
         chat_schema.py
+        conversation_schema.py
       services/
         chat_service.py
+        conversation_service.py
         llm_service.py
   frontend/
     package.json
@@ -61,8 +66,11 @@ ai-qa-assistant/
       index.css
       api/
         chatApi.js
+        conversationApi.js
       components/
         ChatInput.jsx
+        ConversationItem.jsx
+        ConversationList.jsx
         MessageList.jsx
         MessageItem.jsx
       assets/
@@ -109,6 +117,7 @@ LLM_TIMEOUT=30
 
 ```text
 http://127.0.0.1:8001/api/chat
+http://127.0.0.1:8001/api/chat/stream
 ```
 
 因此建议后端启动在 `8001` 端口：
@@ -185,6 +194,77 @@ Content-Type: application/json
 }
 ```
 
+### 流式聊天接口
+
+```http
+POST /api/chat/stream
+Content-Type: application/json
+```
+
+请求体和普通聊天接口一致：
+
+```json
+{
+  "message": "什么是 RAG？",
+  "conversation_id": null
+}
+```
+
+返回值不再是 JSON，而是 `text/plain` 文本流。后端会通过响应头返回当前会话 ID：
+
+```text
+X-Conversation-Id: 1
+```
+
+前端会用 `response.body.getReader()` 逐段读取文本 chunk，并把每个 chunk 追加到同一条 AI 消息里。流结束后，后端才会把完整 assistant 回答保存到 SQLite，不会把每个 chunk 都保存成一条 message。
+
+### 历史会话列表
+
+```http
+GET /api/conversations
+```
+
+返回按 `updated_at` 倒序排列的会话摘要，不包含消息正文列表：
+
+```json
+[
+  {
+    "id": 1,
+    "title": "什么是 RAG？",
+    "created_at": "2026-06-02T10:00:00",
+    "updated_at": "2026-06-02T10:05:00"
+  }
+]
+```
+
+### 会话消息
+
+```http
+GET /api/conversations/{conversation_id}/messages
+```
+
+返回某个会话下的全部 `user` 和 `assistant` 消息，按 `created_at` 正序排列：
+
+```json
+{
+  "conversation_id": 1,
+  "messages": [
+    {
+      "id": 1,
+      "role": "user",
+      "content": "什么是 RAG？",
+      "created_at": "2026-06-02T10:00:00"
+    },
+    {
+      "id": 2,
+      "role": "assistant",
+      "content": "RAG 是检索增强生成...",
+      "created_at": "2026-06-02T10:00:10"
+    }
+  ]
+}
+```
+
 ## 数据库
 
 数据库文件位置：
@@ -241,13 +321,60 @@ Invoke-RestMethod -Uri http://127.0.0.1:8001/api/chat `
   -Body '{"message":"请继续说明","conversation_id":1}'
 ```
 
+测试流式接口：
+
+```powershell
+cd backend
+$env:PYTHONIOENCODING='utf-8'
+@'
+import requests
+
+url = "http://127.0.0.1:8001/api/chat/stream"
+payload = {"message": "What is RAG? Answer in one short sentence.", "conversation_id": None}
+
+with requests.post(url, json=payload, stream=True, timeout=120) as response:
+    print("status =", response.status_code)
+    print("conversation_id =", response.headers.get("X-Conversation-Id"))
+    response.raise_for_status()
+
+    for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+        if chunk:
+            print(chunk, end="", flush=True)
+'@ | .\.venv\Scripts\python.exe -
+```
+
+验证 SQLite 只保存一条完整 assistant 消息：
+
+```powershell
+cd backend
+@'
+import sqlite3
+
+conversation_id = 1
+conn = sqlite3.connect("app.db")
+rows = conn.execute(
+    """
+    select role, count(*) as count
+    from message
+    where conversation_id = ?
+    group by role
+    """,
+    (conversation_id,),
+).fetchall()
+print(rows)
+conn.close()
+'@ | .\.venv\Scripts\python.exe -
+```
+
 检查前端：
 
 1. 启动后端 `8001`。
 2. 启动前端 `5173`。
 3. 打开 `http://localhost:5173`。
-4. 输入消息并点击“发送”。
-5. 页面应显示用户消息、loading 状态和 AI 回复。
+4. 左侧应显示历史会话列表。
+5. 点击任意历史会话，右侧应加载该会话消息。
+6. 输入消息并点击“发送”，AI 回复应逐步显示。
+7. 点击“新建会话”，右侧清空；再次提问后左侧会出现新会话。
 
 ## 常见问题
 

@@ -29,7 +29,7 @@ fetch('http://127.0.0.1:8001/api/chat', {
   headers: {
     'Content-Type': 'application/json',
   },
-  body: JSON.stringify({ message }),
+  body: JSON.stringify({ message, conversation_id }),
 })
 ```
 
@@ -38,7 +38,8 @@ fetch('http://127.0.0.1:8001/api/chat', {
 - 请求地址是 `/api/chat`。
 - 请求方法是 `POST`。
 - 请求内容是 JSON。
-- 发送的数据是 `{ message: '用户输入的内容' }`。
+- 第一次发送的数据可以只有 `{ message: '用户输入的内容' }`。
+- 后续追问时，还会带上 `{ conversation_id: 当前会话 ID }`。
 
 后端返回数据后，前端再把 `answer` 显示到页面上。
 
@@ -121,9 +122,9 @@ backend/app/services/llm_service.py
 而 `chat_service.py` 负责：
 
 1. 找到或创建会话；
-2. 保存用户消息；
+2. 读取最近几条历史消息；
 3. 调用 `llm_service` 获取 AI 回答；
-4. 保存 AI 回答；
+4. 保存当前用户消息和 AI 回答；
 5. 提交数据库事务。
 
 而 `llm_service.py` 负责：
@@ -234,13 +235,13 @@ Pydantic 校验请求体
   ↓
 chat_service 创建或查找 conversation
   ↓
-chat_service 保存用户消息
+chat_service 读取最近几条历史消息
   ↓
-llm_service 调用大模型 API
+llm_service 把历史消息和当前问题一起发给大模型 API
   ↓
 大模型返回 answer
   ↓
-chat_service 保存 AI 回答并提交 SQLite
+chat_service 保存当前用户问题和 AI 回答并提交 SQLite
   ↓
 后端返回 conversation_id 和 answer
   ↓

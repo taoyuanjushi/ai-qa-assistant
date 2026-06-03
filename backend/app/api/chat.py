@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.db.database import get_db
+from app.db.database import SessionLocal, get_db
 from app.schemas.chat_schema import ChatRequest, ChatResponse
 from app.services.chat_service import (
     ChatServiceError,
@@ -26,3 +27,21 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     except ChatServiceError as exc:
         # 大模型调用或业务编排失败，对前端表现为上游服务不可用。
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/stream")
+def chat_stream(request: ChatRequest) -> StreamingResponse:
+    """流式聊天接口：逐步返回 AI 文本，并在结束后保存完整回复。"""
+    db = SessionLocal()
+    try:
+        conversation_id, messages = chat_service.start_stream_chat(db, request)
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        db.close()
+
+    return StreamingResponse(
+        chat_service.stream_answer_and_save(conversation_id, messages),
+        headers={"X-Conversation-Id": str(conversation_id)},
+        media_type="text/plain; charset=utf-8",
+    )

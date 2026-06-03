@@ -1,7 +1,13 @@
 const CHAT_API_URL = 'http://127.0.0.1:8001/api/chat'
+const CHAT_STREAM_API_URL = 'http://127.0.0.1:8001/api/chat/stream'
 
 // 前端 API 封装：把 React 层的消息转换成 POST /api/chat 请求。
-export async function sendChatMessage(message) {
+export async function sendChatMessage(message, conversationId = null) {
+  const body = { message }
+  if (conversationId !== null) {
+    body.conversation_id = conversationId
+  }
+
   // fetch 返回的是 HTTP 响应对象，不会因为 4xx/5xx 自动抛错。
   const response = await fetch(CHAT_API_URL, {
     method: 'POST',
@@ -9,8 +15,8 @@ export async function sendChatMessage(message) {
       // 告诉 FastAPI 请求体是 JSON，后端才能按 ChatRequest 解析。
       'Content-Type': 'application/json',
     },
-    // 当前版本只发送 message；后续多轮会话可以在这里追加 conversation_id。
-    body: JSON.stringify({ message }),
+    // 第一次只发送 message；后续会带上同一个 conversation_id。
+    body: JSON.stringify(body),
   })
 
   // 尝试解析响应 JSON；如果后端返回空响应或非 JSON，就用 null 兜底。
@@ -25,6 +31,64 @@ export async function sendChatMessage(message) {
     throw new Error('后端返回格式不正确。')
   }
 
+  if (typeof data.conversation_id !== 'number') {
+    throw new Error('后端没有返回 conversation_id。')
+  }
+
   // 返回完整数据，当前页面主要使用 data.answer。
   return data
+}
+
+export async function sendChatMessageStream(
+  message,
+  conversationId = null,
+  onChunk,
+  onConversationId,
+) {
+  const body = { message, conversation_id: conversationId }
+
+  const response = await fetch(CHAT_STREAM_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '')
+    throw new Error(errorText || '流式请求失败，请检查后端服务。')
+  }
+
+  if (!response.body) {
+    throw new Error('当前浏览器不支持流式读取。')
+  }
+
+  const nextConversationId = Number(response.headers.get('X-Conversation-Id'))
+  if (!Number.isFinite(nextConversationId)) {
+    throw new Error('后端没有返回 conversation_id。')
+  }
+  onConversationId?.(nextConversationId)
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+
+    const chunk = decoder.decode(value, { stream: true })
+    if (chunk) {
+      onChunk(chunk)
+    }
+  }
+
+  const finalChunk = decoder.decode()
+  if (finalChunk) {
+    onChunk(finalChunk)
+  }
+
+  return { conversation_id: nextConversationId }
 }

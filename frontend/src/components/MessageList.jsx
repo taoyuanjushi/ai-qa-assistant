@@ -12,12 +12,19 @@ export default function MessageList({ isLoading = false, messages = [] }) {
     )
   }
 
+  const lastMessage = messages.at(-1)
+  const isStreamingLastAssistant = isLoading && lastMessage?.role === 'assistant'
+
   return (
     <div className="message-list" aria-live="polite">
-      {messages.map((message) => (
-        <MessageItem key={message.id} message={message} />
+      {messages.map((message, index) => (
+        <MessageItem
+          isPending={isStreamingLastAssistant && index === messages.length - 1}
+          key={message.id}
+          message={message}
+        />
       ))}
-      {isLoading && (
+      {isLoading && !isStreamingLastAssistant && (
         <MessageItem
           message={{
             id: 'loading',

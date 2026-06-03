@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import requests
@@ -13,7 +14,11 @@ class LLMServiceError(RuntimeError):
 
 
 class LLMService:
-    def chat(self, message: str) -> str:
+    def chat(
+        self,
+        message: str,
+        history_messages: list[dict[str, str]] | None = None,
+    ) -> str:
         """调用 OpenAI-compatible chat completions 接口并返回回答文本。"""
         # 配置缺失时不发起外部请求，直接返回可读错误。
         self._validate_settings()
@@ -26,8 +31,8 @@ class LLMService:
                 json={
                     # model 指定使用哪个大模型。
                     "model": settings.llm_model,
-                    # messages 包含系统提示词和本次用户问题。
-                    "messages": build_messages(message),
+                    # messages 包含系统提示词、最近历史消息和本次用户问题。
+                    "messages": build_messages(message, history_messages),
                 },
                 timeout=settings.llm_timeout,
             )
@@ -47,6 +52,78 @@ class LLMService:
 
         # 只把回答文本返回给 chat_service，隐藏模型响应的复杂结构。
         return self._extract_answer(data)
+
+    def chat_completion_stream(self, messages: list[dict[str, str]]):
+        """流式调用 OpenAI-compatible chat completions，逐步产出文本 chunk。"""
+        self._validate_settings()
+
+        try:
+            with requests.post(
+                self._chat_completions_url(),
+                headers=self._headers(),
+                json={
+                    "model": settings.llm_model,
+                    "messages": messages,
+                    "stream": True,
+                },
+                stream=True,
+                timeout=settings.llm_timeout,
+            ) as response:
+                if not response.ok:
+                    raise LLMServiceError(self._format_error_response(response))
+
+                # text/event-stream 没有 charset 时，requests 会默认按 ISO-8859-1
+                # 解码，中文会变成乱码；这里保留 bytes 并手动按 UTF-8 解码。
+                for raw_line in response.iter_lines(decode_unicode=False):
+                    line = self._decode_stream_line(raw_line)
+                    if not line:
+                        continue
+
+                    chunk = self._extract_stream_chunk(line)
+                    if chunk:
+                        yield chunk
+        except requests.RequestException as exc:
+            raise LLMServiceError(f"大模型 API 流式请求失败：{exc}") from exc
+
+    def _decode_stream_line(self, raw_line: bytes | str) -> str:
+        """把模型流中的一行按 UTF-8 解码成字符串。"""
+        if isinstance(raw_line, bytes):
+            return raw_line.decode("utf-8", errors="replace")
+
+        return raw_line
+
+    def _extract_stream_chunk(self, line: str) -> str:
+        """从 OpenAI-compatible SSE 行中提取增量文本。"""
+        line = line.strip()
+        if not line.startswith("data:"):
+            return ""
+
+        data = line.removeprefix("data:").strip()
+        if data == "[DONE]":
+            return ""
+
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            return ""
+
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+
+        delta = choices[0].get("delta", {})
+        if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+            return delta["content"]
+
+        message = choices[0].get("message", {})
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return message["content"]
+
+        text = choices[0].get("text")
+        if isinstance(text, str):
+            return text
+
+        return ""
 
     def _validate_settings(self) -> None:
         """在真正发请求前检查必要环境变量，失败时给出明确提示。"""
