@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router
 from app.api.conversation import router as conversation_router
+from app.api.rag import router as rag_router
 from app.core.config import settings
 from app.db.database import init_db
 
@@ -34,6 +35,7 @@ app.add_middleware(
 # 最终聊天接口路径是 /api + /chat，即 POST /api/chat。
 app.include_router(chat_router, prefix="/api")
 app.include_router(conversation_router, prefix="/api")
+app.include_router(rag_router, prefix="/api")
 
 
 @app.get("/api/health")

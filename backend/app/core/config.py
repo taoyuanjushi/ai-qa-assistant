@@ -30,6 +30,16 @@ class Settings:
     llm_base_url: str = os.getenv("LLM_BASE_URL", "").rstrip("/")
     llm_model: str = os.getenv("LLM_MODEL", "")
     llm_timeout: int = _get_int_env("LLM_TIMEOUT", 30)
+    embedding_api_key: str = os.getenv("EMBEDDING_API_KEY") or os.getenv("LLM_API_KEY", "")
+    embedding_base_url: str = (
+        os.getenv("EMBEDDING_BASE_URL") or os.getenv("LLM_BASE_URL", "")
+    ).rstrip("/")
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "")
+    chroma_persist_dir: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+    chroma_collection_name: str = os.getenv(
+        "CHROMA_COLLECTION_NAME",
+        "ai_qa_documents",
+    )
 
 
 settings = Settings()
