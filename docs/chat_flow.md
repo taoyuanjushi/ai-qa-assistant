@@ -4,7 +4,7 @@
 
 1. 普通聊天调用链：`POST /api/chat`
 2. 流式输出调用链：`POST /api/chat/stream`
-3. RAG 调用链：`POST /api/rag/documents`、`POST /api/rag/documents/batch`、`POST /api/rag/chat` 和 `POST /api/rag/chat/stream`
+3. RAG 调用链：`POST /api/rag/documents`、`POST /api/rag/documents/batch`、`DELETE /api/rag/documents/{document_id}`、`DELETE /api/rag/documents`、`POST /api/rag/documents/{document_id}/reindex`、`POST /api/rag/documents/{document_id}/summary/regenerate`、`POST /api/rag/chat` 和 `POST /api/rag/chat/stream`
 
 当前前端 `ChatPage.jsx` 在“基于文档回答”关闭时默认走流式输出；普通非流式接口仍保留在 `chatApi.js` 中，适合测试或后续切回非流式模式。
 
@@ -14,16 +14,18 @@
 | --- | --- | --- |
 | React 页面 | `frontend/src/ChatPage.jsx` | 管理消息、会话、文档、RAG 开关，并决定走流式聊天还是 RAG 聊天。 |
 | React API | `frontend/src/api/chatApi.js` | 封装普通聊天和流式聊天请求。 |
-| React RAG API | `frontend/src/api/ragApi.js` | 封装单文件/批量文档上传、文档列表、普通 RAG 和流式 RAG 请求。 |
+| React RAG API | `frontend/src/api/ragApi.js` | 封装单文件/批量文档上传、文档列表、删除、清空、重建索引、重新生成摘要、普通 RAG 和流式 RAG 请求。 |
 | FastAPI 聊天路由 | `backend/app/api/chat.py` | 提供 `POST /api/chat` 和 `POST /api/chat/stream`。 |
-| FastAPI RAG 路由 | `backend/app/api/rag.py` | 提供单文件上传、批量上传、文档列表、普通 RAG 和流式 RAG 接口。 |
+| FastAPI RAG 路由 | `backend/app/api/rag.py` | 提供单文件上传、批量上传、文档列表、删除文档、清空知识库、重建索引、重新生成摘要、普通 RAG 和流式 RAG 接口。 |
 | 聊天业务层 | `backend/app/services/chat_service.py` | 读取历史、调用 LLM、保存普通/流式聊天消息。 |
-| RAG 业务层 | `backend/app/services/rag_service.py` | 文档切分、embedding、Chroma 写入/检索、RAG Prompt、消息落库。 |
+| RAG 业务层 | `backend/app/services/rag_service.py` | 文档切分、embedding、Chroma 写入/检索、Rerank、摘要缓存、文档删除、知识库清空、索引重建、RAG Prompt、消息落库。 |
+| Rerank 服务 | `backend/app/services/rerank_service.py` | 对 Chroma 粗召回 sources 做规则重排或可选 LLM 重排。 |
+| 摘要服务 | `backend/app/services/summary_service.py` | 基于解析后的文档纯文本生成结构化摘要。 |
 | 文档解析服务 | `backend/app/services/document_parser.py` | 从 TXT、Markdown、PDF、DOCX 上传文件中提取纯文本。 |
 | LLM 服务 | `backend/app/services/llm_service.py` | 调用 OpenAI-compatible `/chat/completions`，支持普通和 stream。 |
 | Embedding 服务 | `backend/app/services/embedding_service.py` | 调用 OpenAI-compatible `/embeddings`，按 10 条一批生成向量。 |
-| Chroma 服务 | `backend/app/services/chroma_service.py` | 写入本地 Chroma collection，并按 `document_ids` 范围检索和合并排序。 |
-| SQLite ORM | `backend/app/db/database.py` | 保存 conversation、message、document 元信息。 |
+| Chroma 服务 | `backend/app/services/chroma_service.py` | 写入本地 Chroma collection，删除单文档 chunks，清空 collection，并按 `document_ids` 范围检索和合并排序。 |
+| SQLite ORM | `backend/app/db/database.py` | 保存 conversation、message、document 元信息、解析文本 `content` 和索引状态 `status`。 |
 
 ## 普通聊天调用链
 
@@ -261,6 +263,11 @@ Chroma
   collection.add(ids, documents, embeddings, metadatas)
   metadata 包含 document_id / filename / file_type / chunk_index / created_at
     ↓
+summary_service
+  generate_document_summary(filename, content)
+  成功：summary_status=ready
+  失败：summary_status=failed，但上传继续成功
+    ↓
 SQLite
   db.commit()
     ↓
@@ -296,10 +303,154 @@ sequenceDiagram
     E-->>G: list[list[float]]
     G->>D: 创建 document 元信息并 flush
     G->>C: add chunks + embeddings + metadata
+    G->>G: 生成摘要缓存，失败只标记 summary_status=failed
     G->>D: commit
     end
     G-->>A: DocumentBatchUploadResponse
     A-->>R: {uploaded: [...], failed: [...]}
+```
+
+### RAG 文档管理链路
+
+文档管理操作都集成在主聊天窗口的 `DocumentToolbar` 中，不新增单独页面。它们只影响知识库数据，不删除 `conversation` 和 `message`。
+
+#### 删除单个文档
+
+```text
+React
+  DocumentToolbar 点击“删除”
+    ↓ 二次确认
+ChatPage.handleDeleteDocument(documentId)
+    ↓
+frontend/src/api/ragApi.js
+  deleteDocument(documentId)
+    ↓ DELETE /api/rag/documents/{document_id}
+FastAPI
+  backend/app/api/rag.py
+  delete_document(document_id, db)
+    ↓
+rag_service.delete_document(db, document_id)
+    ↓
+SQLite
+  检查 Document 是否存在
+    ↓
+Chroma
+  delete_document_chunks(document_id)
+  按 metadata.document_id 删除该文档全部 chunks / embeddings / metadata
+    ↓
+SQLite
+  删除 Document 记录并 commit
+    ↓
+React
+  刷新文档列表
+  从 selectedDocumentIds 移除已删除 ID
+```
+
+#### 清空知识库
+
+```text
+React
+  DocumentToolbar 点击“清空知识库”
+    ↓ 二次确认
+ChatPage.handleClearKnowledgeBase()
+    ↓
+frontend/src/api/ragApi.js
+  clearKnowledgeBase()
+    ↓ DELETE /api/rag/documents
+FastAPI
+  backend/app/api/rag.py
+  clear_knowledge_base(db)
+    ↓
+rag_service.clear_knowledge_base(db)
+    ↓
+Chroma
+  clear_collection()
+  删除当前 collection 并重建空 collection
+    ↓
+SQLite
+  删除所有 Document 记录
+  不删除 Conversation / Message
+    ↓
+React
+  documents=[]
+  selectedDocumentIds=[]
+  ragEnabled=false
+```
+
+#### 重建单个文档索引
+
+```text
+React
+  DocumentToolbar 点击“重建索引”
+    ↓ 二次确认
+ChatPage.handleReindexDocument(documentId)
+    ↓
+frontend/src/api/ragApi.js
+  reindexDocument(documentId)
+    ↓ POST /api/rag/documents/{document_id}/reindex
+FastAPI
+  backend/app/api/rag.py
+  reindex_document(document_id, db)
+    ↓
+rag_service.reindex_document(db, document_id)
+    ↓
+SQLite
+  检查 Document 是否存在
+  检查 document.content 是否有解析文本
+  status = reindexing
+    ↓
+rag_service
+  split_text_into_chunks(document.content)
+    ↓
+embedding_service
+  get_embeddings(chunks)
+    ↓
+Chroma
+  delete_document_chunks(document_id)
+  add_chunks_to_chroma(..., replace_existing=False)
+    ↓
+SQLite
+  更新 chunk_count / chroma_collection / status=ready / updated_at
+    ↓
+React
+  刷新文档列表
+  展示新的 chunk_count
+```
+
+旧文档如果 `document.content` 为空，会直接返回“该文档缺少原始内容，无法重建索引，请重新上传。”，不会删除旧 Chroma chunks。
+
+#### 重新生成文档摘要
+
+```text
+React
+  DocumentToolbar 点击“生成摘要”
+    ↓ 二次确认
+ChatPage.handleRegenerateDocumentSummary(documentId)
+    ↓
+frontend/src/api/ragApi.js
+  regenerateDocumentSummary(documentId)
+    ↓ POST /api/rag/documents/{document_id}/summary/regenerate
+FastAPI
+  backend/app/api/rag.py
+  regenerate_document_summary(document_id, db)
+    ↓
+rag_service.regenerate_document_summary(db, document_id)
+    ↓
+SQLite
+  检查 Document 是否存在
+  检查 document.content 是否有解析文本
+  summary_status = pending
+    ↓
+summary_service
+  generate_document_summary(filename, content)
+    ↓
+SQLite
+  成功：保存 summary，summary_status=ready，更新 summary_updated_at
+  失败：summary_status=failed，并返回清晰错误
+    ↓
+React
+  刷新文档列表
+  展示摘要状态和摘要预览
 ```
 
 ### RAG 普通问答链路
@@ -333,16 +484,22 @@ Embedding API
   POST {EMBEDDING_BASE_URL}/embeddings
     ↓
 chroma_service
-  search_chroma(query_embedding, document_ids, top_k=5/10)
+  search_chroma(query_embedding, document_ids, top_k=RERANK_CANDIDATE_TOP_K)
     ↓
 Chroma
   未限定文档时 collection.query()
   限定多个文档时按 document_id where 过滤，多次查询后合并排序
-  返回 top-k documents / metadatas / distances
+  返回 candidate documents / metadatas / distances
+    ↓
+rerank_service
+  优先专业 rerank API；可配置 LLM rerank
+  失败时回退到规则排序或 Chroma 原顺序
+  返回 final_top_k 个 reranked sources
     ↓
 rag_service
   转成 RagSource
-  build_rag_prompt(question, source_contents)
+  build_rag_prompt(question, reranked source contents)
+  多文档论文分析时额外加入 document summaries
     ↓
 llm_service
   chat(rag_prompt)
@@ -385,9 +542,10 @@ sequenceDiagram
     E->>V: POST /embeddings
     V-->>E: question embedding
     E-->>G: query_embedding
-    G->>C: search_chroma(query_embedding, document_ids, top_k=5/10)
+    G->>C: search_chroma(query_embedding, document_ids, candidate_top_k)
     C-->>G: top-k chunks + metadata + distance
-    G->>G: build_rag_prompt(question, chunks)
+    G->>G: rerank sources
+    G->>G: build_rag_prompt(question, reranked sources)
     G->>L: chat(rag_prompt)
     L->>M: POST /chat/completions
     M-->>L: answer
@@ -424,11 +582,15 @@ embedding_service
   get_embedding(question)
     ↓
 chroma_service
-  search_chroma(query_embedding, document_ids, top_k=5/10)
+  search_chroma(query_embedding, document_ids, top_k=RERANK_CANDIDATE_TOP_K)
+    ↓
+rerank_service
+  取 RERANK_FINAL_TOP_K 个 reranked sources
     ↓
 rag_service
   yield {"type":"metadata","conversation_id":...,"sources":[...]}
-  build_rag_prompt(question, source_contents)
+  build_rag_prompt(question, reranked source contents)
+  多文档论文分析时额外加入 document summaries
     ↓
 llm_service
   chat_completion_stream(messages)
@@ -464,8 +626,9 @@ sequenceDiagram
     A->>G: stream_chat(request)
     G->>D: 创建/读取 conversation，保存 user message
     G->>E: get_embedding(question)
-    G->>C: search_chroma(query_embedding, document_ids, top_k=5/10)
-    G-->>A: NDJSON metadata {conversation_id, sources}
+    G->>C: search_chroma(query_embedding, document_ids, candidate_top_k)
+    G->>G: rerank sources
+    G-->>A: NDJSON metadata {conversation_id, reranked sources}
     A-->>R: metadata
     G->>L: chat_completion_stream(rag_messages)
     L->>M: POST /chat/completions stream=True
@@ -484,11 +647,13 @@ sequenceDiagram
 - 旧字段 `document_id` 继续兼容；新字段 `document_ids` 优先级更高。
 - `document_ids` 有值时只检索这些文档；`document_ids: []` 或未传时检索 Chroma 中全部文档。
 - 当前前端开启 RAG 后可以勾选多个文档；未勾选具体文档时默认传空数组，让后端检索全部已上传文档。
-- 单文档检索使用 top 5，多文档或全部文档检索使用 top 10。
+- Rerank 开启时，先用 `RERANK_CANDIDATE_TOP_K` 粗召回，再用 `RERANK_FINAL_TOP_K` 作为最终 sources 数量。
+- 配置 `RERANK_MODEL` 时优先使用专业 Rerank API；专业 API 不可用时可按 `RERANK_USE_LLM` 继续尝试 LLM Rerank，最终回退到规则排序。
 - `embedding_service` 负责文本转向量，不参与业务判断。
 - `chroma_service` 只保存和检索 chunk 文本、embedding、metadata。
 - 新上传文档的 Chroma metadata 包含 `document_id`、`filename`、`file_type`、`chunk_index`、`created_at`；旧数据可能缺少 `file_type`。
-- `rag_service` 负责把检索出来的 chunk 拼成 RAG Prompt；普通 RAG 用 `llm_service.chat()`，流式 RAG 用 `llm_service.chat_completion_stream()`。
+- `rag_service` 负责把 reranked chunk 拼成 RAG Prompt；普通 RAG 用 `llm_service.chat()`，流式 RAG 用 `llm_service.chat_completion_stream()`。
+- 多文档论文分析会把相关文档摘要加入 Prompt，摘要用于整体理解，sources 仍然用于具体依据。
 - RAG 问答会把 user question 和 assistant answer 保存到普通 `message` 表，因此历史会话列表仍然复用同一套 conversation/message。
 - 流式 RAG 不会每个 chunk 保存一次数据库，只在流结束后保存一条完整 assistant message。
 
@@ -500,8 +665,12 @@ sequenceDiagram
 | 流式聊天 | `POST /api/chat/stream` | 文本流 + `X-Conversation-Id` | 是 | 否 | 先保存 user，流结束后保存 assistant |
 | RAG 单文件上传 | `POST /api/rag/documents` | `{document_id, filename, file_type, chunk_count}` | 否 | 是，写入 chunks | 保存 document 元信息 |
 | RAG 批量上传 | `POST /api/rag/documents/batch` | `{uploaded, failed}` | 否 | 是，逐文件写入 chunks | 保存成功文件的 document 元信息 |
-| RAG 问答 | `POST /api/rag/chat` | `{conversation_id, answer, sources}` | 否 | 是，按 `document_ids` 检索 chunks | 保存 user + assistant |
-| RAG 流式问答 | `POST /api/rag/chat/stream` | NDJSON metadata/chunk/done/error | 是 | 是，按 `document_ids` 检索 chunks | 先保存 user，流结束后保存 assistant |
+| 删除单个文档 | `DELETE /api/rag/documents/{document_id}` | `{document_id, deleted, message}` | 否 | 是，删除该文档 chunks | 删除该 document 元信息 |
+| 清空知识库 | `DELETE /api/rag/documents` | `{deleted_documents, cleared_vector_store, message}` | 否 | 是，删除并重建 collection | 删除所有 document 元信息 |
+| 重建索引 | `POST /api/rag/documents/{document_id}/reindex` | `{document_id, filename, chunk_count, status, message}` | 否 | 是，删除旧 chunks 后写入新 chunks | 更新 chunk_count/status |
+| 重新生成摘要 | `POST /api/rag/documents/{document_id}/summary/regenerate` | `{document_id, filename, summary, summary_status, message}` | 否 | 否 | 更新 summary/summary_status |
+| RAG 问答 | `POST /api/rag/chat` | `{conversation_id, answer, sources}` | 否 | 是，按 `document_ids` 粗召回并 rerank chunks | 保存 user + assistant |
+| RAG 流式问答 | `POST /api/rag/chat/stream` | NDJSON metadata/chunk/done/error | 是 | 是，按 `document_ids` 粗召回并 rerank chunks | 先保存 user，流结束后保存 assistant |
 
 ## 历史会话加载链路
 

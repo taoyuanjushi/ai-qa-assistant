@@ -1,7 +1,12 @@
 .env
+.env.*
+!.env.example
 .venv/
 *.db
 chroma_db/
+data/
+logs/
+*.log
 __pycache__/
 *.py[cod]
 node_modules/

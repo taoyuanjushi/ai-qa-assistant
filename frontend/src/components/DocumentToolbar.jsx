@@ -20,17 +20,50 @@ function formatFileType(fileType) {
 }
 
 
+function formatDocumentStatus(status) {
+  // 后端 status 是机器可读值，这里转换成用户能看懂的短文案。
+  if (status === 'reindexing') {
+    return '重建中'
+  }
+  if (status === 'failed') {
+    return '索引失败'
+  }
+
+  return '就绪'
+}
+
+
+function formatSummaryStatus(status) {
+  if (status === 'ready') {
+    return '摘要已生成'
+  }
+  if (status === 'failed') {
+    return '摘要失败'
+  }
+
+  return '摘要待生成'
+}
+
+
 export default function DocumentToolbar({
+  deletingDocumentId = null,
   documents = [],
   error = '',
+  isClearingKnowledgeBase = false,
   isLoading = false,
   isUploading = false,
+  onClearKnowledgeBase,
+  onDeleteDocument,
   onRefresh,
+  onRegenerateDocumentSummary,
+  onReindexDocument,
   onSelectDocumentIds,
   onToggleRag,
   onUpload,
   ragEnabled = false,
+  reindexingDocumentId = null,
   selectedDocumentIds = [],
+  summarizingDocumentId = null,
   uploadStatus = '',
 }) {
   const fileInputRef = useRef(null)
@@ -93,6 +126,47 @@ export default function DocumentToolbar({
     onSelectDocumentIds?.([])
   }
 
+  function handleDeleteDocument(document) {
+    // 删除会同时清 SQLite 元信息和 Chroma 向量索引，因此必须二次确认。
+    const confirmed = window.confirm('确定删除该文档吗？删除后将同时删除对应向量索引。')
+    if (!confirmed) {
+      return
+    }
+
+    onDeleteDocument?.(document.id)
+  }
+
+  function handleReindexDocument(document) {
+    // 重建索引会重新生成 embedding，可能消耗外部 API 调用额度。
+    const confirmed = window.confirm('确定重建该文档索引吗？这会删除旧向量并重新生成 embedding。')
+    if (!confirmed) {
+      return
+    }
+
+    onReindexDocument?.(document.id)
+  }
+
+  function handleRegenerateDocumentSummary(document) {
+    const confirmed = window.confirm('确定重新生成该文档摘要吗？这会再次调用大模型。')
+    if (!confirmed) {
+      return
+    }
+
+    onRegenerateDocumentSummary?.(document.id)
+  }
+
+  function handleClearKnowledgeBase() {
+    // 清空知识库不删除聊天历史，但会删除所有文档和向量索引。
+    const confirmed = window.confirm(
+      '确定清空整个知识库吗？这会删除所有文档和向量索引，但不会删除聊天历史。',
+    )
+    if (!confirmed) {
+      return
+    }
+
+    onClearKnowledgeBase?.()
+  }
+
   const selectedLabel =
     selectedDocumentIds.length > 0
       ? `已选 ${selectedDocumentIds.length} 个文档`
@@ -145,6 +219,22 @@ export default function DocumentToolbar({
         <button disabled={isLoading} onClick={onRefresh} type="button">
           刷新
         </button>
+        <button
+          className="document-toolbar__clear"
+          // 知识库维护操作互斥，避免一个操作未完成时又触发另一个破坏性操作。
+          disabled={
+            isLoading ||
+            isUploading ||
+            deletingDocumentId !== null ||
+            reindexingDocumentId !== null ||
+            summarizingDocumentId !== null ||
+            isClearingKnowledgeBase
+          }
+          onClick={handleClearKnowledgeBase}
+          type="button"
+        >
+          {isClearingKnowledgeBase ? '清空中' : '清空知识库'}
+        </button>
       </div>
 
       <div className="document-toolbar__selection" aria-label="知识库范围">
@@ -154,18 +244,78 @@ export default function DocumentToolbar({
         {documents.length > 0 && (
           <div className="document-toolbar__document-list">
             {documents.map((document) => (
-              <label className="document-option" key={document.id}>
+              <div className="document-option" key={document.id}>
                 <input
+                  aria-label={`选择文档 ${document.filename}`}
                   checked={selectedIdSet.has(document.id)}
-                  disabled={isLoading}
+                  disabled={
+                    isLoading ||
+                    deletingDocumentId !== null ||
+                    reindexingDocumentId !== null ||
+                    summarizingDocumentId !== null ||
+                    isClearingKnowledgeBase
+                  }
                   onChange={(event) => handleDocumentToggle(document.id, event.target.checked)}
                   type="checkbox"
                 />
                 <span className="document-option__name">{document.filename}</span>
-                <span className="document-option__meta">
-                  {formatFileType(document.file_type)} · {document.chunk_count} chunks
+                <span className="document-option__actions">
+                  <button
+                    aria-label={`重建文档索引 ${document.filename}`}
+                    className="document-option__reindex"
+                    // 单文档维护期间禁用其他文档操作，保持 selectedDocumentIds 和列表同步。
+                    disabled={
+                      isLoading ||
+                      deletingDocumentId !== null ||
+                      reindexingDocumentId !== null ||
+                      summarizingDocumentId !== null ||
+                      isClearingKnowledgeBase
+                    }
+                    onClick={() => handleReindexDocument(document)}
+                    type="button"
+                  >
+                    {reindexingDocumentId === document.id ? '重建中' : '重建索引'}
+                  </button>
+                  <button
+                    aria-label={`重新生成文档摘要 ${document.filename}`}
+                    className="document-option__summary"
+                    disabled={
+                      isLoading ||
+                      deletingDocumentId !== null ||
+                      reindexingDocumentId !== null ||
+                      summarizingDocumentId !== null ||
+                      isClearingKnowledgeBase
+                    }
+                    onClick={() => handleRegenerateDocumentSummary(document)}
+                    type="button"
+                  >
+                    {summarizingDocumentId === document.id ? '摘要中' : '生成摘要'}
+                  </button>
+                  <button
+                    aria-label={`删除文档 ${document.filename}`}
+                    className="document-option__delete"
+                    disabled={
+                      isLoading ||
+                      deletingDocumentId !== null ||
+                      reindexingDocumentId !== null ||
+                      summarizingDocumentId !== null ||
+                      isClearingKnowledgeBase
+                    }
+                    onClick={() => handleDeleteDocument(document)}
+                    type="button"
+                  >
+                    {deletingDocumentId === document.id ? '删除中' : '删除'}
+                  </button>
                 </span>
-              </label>
+                <span className="document-option__meta">
+                  {formatFileType(document.file_type)} · {document.chunk_count} chunks · {formatDocumentStatus(document.status)} · {formatSummaryStatus(document.summary_status)}
+                </span>
+                {document.summary_preview && (
+                  <span className="document-option__summary-preview">
+                    {document.summary_preview}
+                  </span>
+                )}
+              </div>
             ))}
           </div>
         )}

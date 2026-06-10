@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.core.error_codes import ErrorCode
+from app.core.exceptions import AppException
 from app.db.database import SessionLocal, get_db
 from app.schemas.chat_schema import ChatRequest, ChatResponse
 from app.services.chat_service import (
@@ -23,10 +25,18 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
         return chat_service.handle_chat(db, request)
     except ConversationNotFoundError as exc:
         # 用户传入不存在的 conversation_id，语义上是客户端请求资源不存在。
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise AppException(
+            message=str(exc),
+            code=ErrorCode.CONVERSATION_NOT_FOUND,
+            status_code=404,
+        ) from exc
     except ChatServiceError as exc:
         # 大模型调用或业务编排失败，对前端表现为上游服务不可用。
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise AppException(
+            message=str(exc),
+            code=ErrorCode.LLM_ERROR,
+            status_code=502,
+        ) from exc
 
 
 @router.post("/stream")
@@ -36,7 +46,11 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     try:
         conversation_id, messages = chat_service.start_stream_chat(db, request)
     except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise AppException(
+            message=str(exc),
+            code=ErrorCode.CONVERSATION_NOT_FOUND,
+            status_code=404,
+        ) from exc
     finally:
         db.close()
 

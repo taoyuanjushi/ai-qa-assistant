@@ -1,4 +1,5 @@
-const API_BASE_URL = 'http://127.0.0.1:8001/api'
+import { API_BASE_URL } from './config'
+import { getApiErrorMessage } from './errors'
 
 
 async function requestJson(url) {
@@ -6,7 +7,7 @@ async function requestJson(url) {
   const data = await response.json().catch(() => null)
 
   if (!response.ok) {
-    throw new Error(data?.detail || '请求历史会话失败。')
+    throw new Error(getApiErrorMessage(data, '请求历史会话失败。'))
   }
 
   return data

@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.core.error_codes import ErrorCode
+from app.core.exceptions import AppException
 from app.db.database import get_db
 from app.schemas.conversation_schema import (
     ConversationMessagesResponse,
@@ -30,4 +32,8 @@ def get_conversation_messages(
     try:
         return conversation_service.get_messages(db, conversation_id)
     except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise AppException(
+            message=str(exc),
+            code=ErrorCode.CONVERSATION_NOT_FOUND,
+            status_code=404,
+        ) from exc

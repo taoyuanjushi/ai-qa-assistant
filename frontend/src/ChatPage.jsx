@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { sendChatMessageStream } from './api/chatApi'
 import { fetchConversationMessages, fetchConversations } from './api/conversationApi'
-import { getDocuments, ragChatStream, uploadDocuments } from './api/ragApi'
+import {
+  clearKnowledgeBase,
+  deleteDocument,
+  getDocuments,
+  ragChatStream,
+  regenerateDocumentSummary,
+  reindexDocument,
+  uploadDocuments,
+} from './api/ragApi'
 import ChatInput from './components/ChatInput'
 import ConversationList from './components/ConversationList'
 import DocumentToolbar from './components/DocumentToolbar'
@@ -59,6 +67,11 @@ export default function ChatPage() {
   const [isUploadingDocument, setIsUploadingDocument] = useState(false)
   const [documentError, setDocumentError] = useState('')
   const [uploadStatus, setUploadStatus] = useState('')
+  // 以下三个状态用于文档维护操作互斥，避免同时删除、清空或重建造成列表状态错乱。
+  const [deletingDocumentId, setDeletingDocumentId] = useState(null)
+  const [isClearingKnowledgeBase, setIsClearingKnowledgeBase] = useState(false)
+  const [reindexingDocumentId, setReindexingDocumentId] = useState(null)
+  const [summarizingDocumentId, setSummarizingDocumentId] = useState(null)
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === conversationId) || null,
@@ -250,6 +263,77 @@ export default function ChatPage() {
     }
   }
 
+  async function handleDeleteDocument(documentId) {
+    setDeletingDocumentId(documentId)
+    setDocumentError('')
+    setUploadStatus('')
+
+    try {
+      const result = await deleteDocument(documentId)
+      // 删除成功后先从当前选择里移除，再刷新列表，避免短时间内继续传已删除 ID。
+      setSelectedDocumentIds((currentIds) => currentIds.filter((id) => id !== documentId))
+      await loadDocuments()
+      setUploadStatus(result.message || '文档已删除，对应向量索引也已清理')
+    } catch (err) {
+      setDocumentError(err.message || '删除文档失败。')
+    } finally {
+      setDeletingDocumentId(null)
+    }
+  }
+
+  async function handleClearKnowledgeBase() {
+    setIsClearingKnowledgeBase(true)
+    setDocumentError('')
+    setUploadStatus('')
+
+    try {
+      const result = await clearKnowledgeBase()
+      // 清空知识库后关闭 RAG 开关，避免下一次发送时仍走文档问答但已无可用文档。
+      setDocuments([])
+      setSelectedDocumentIds([])
+      setRagEnabled(false)
+      await loadDocuments()
+      setUploadStatus(result.message || '知识库已清空')
+    } catch (err) {
+      setDocumentError(err.message || '清空知识库失败。')
+    } finally {
+      setIsClearingKnowledgeBase(false)
+    }
+  }
+
+  async function handleReindexDocument(documentId) {
+    setReindexingDocumentId(documentId)
+    setDocumentError('')
+    setUploadStatus('')
+
+    try {
+      const result = await reindexDocument(documentId)
+      // 重建索引不会改变选中范围，只刷新列表中的 chunk_count/status。
+      await loadDocuments()
+      setUploadStatus(`${result.message}：${result.filename}，${result.chunk_count} chunks`)
+    } catch (err) {
+      setDocumentError(err.message || '重建文档索引失败。')
+    } finally {
+      setReindexingDocumentId(null)
+    }
+  }
+
+  async function handleRegenerateDocumentSummary(documentId) {
+    setSummarizingDocumentId(documentId)
+    setDocumentError('')
+    setUploadStatus('')
+
+    try {
+      const result = await regenerateDocumentSummary(documentId)
+      await loadDocuments()
+      setUploadStatus(`${result.message}：${result.filename}`)
+    } catch (err) {
+      setDocumentError(err.message || '重新生成文档摘要失败。')
+    } finally {
+      setSummarizingDocumentId(null)
+    }
+  }
+
   function handleNewConversation() {
     shouldStickToBottomRef.current = true
     setConversationId(null)
@@ -415,14 +499,22 @@ export default function ChatPage() {
           <DocumentToolbar
             documents={documents}
             error={documentError}
+            deletingDocumentId={deletingDocumentId}
+            isClearingKnowledgeBase={isClearingKnowledgeBase}
             isLoading={isLoadingDocuments}
             isUploading={isUploadingDocument}
+            onClearKnowledgeBase={handleClearKnowledgeBase}
+            onDeleteDocument={handleDeleteDocument}
             onRefresh={loadDocuments}
+            onRegenerateDocumentSummary={handleRegenerateDocumentSummary}
+            onReindexDocument={handleReindexDocument}
             onSelectDocumentIds={setSelectedDocumentIds}
             onToggleRag={setRagEnabled}
             onUpload={handleUploadDocuments}
             ragEnabled={ragEnabled}
+            reindexingDocumentId={reindexingDocumentId}
             selectedDocumentIds={selectedDocumentIds}
+            summarizingDocumentId={summarizingDocumentId}
             uploadStatus={uploadStatus}
           />
 

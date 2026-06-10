@@ -1,10 +1,15 @@
 import json
+import logging
+import time
 from typing import Any
 
 import requests
 
 from app.core.config import settings
 from app.core.prompt import build_messages
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMServiceError(RuntimeError):
@@ -22,6 +27,7 @@ class LLMService:
         """调用 OpenAI-compatible chat completions 接口并返回回答文本。"""
         # 配置缺失时不发起外部请求，直接返回可读错误。
         self._validate_settings()
+        start_time = time.perf_counter()
 
         try:
             # requests.post 会同步等待模型服务响应，超时时间来自 .env。
@@ -38,10 +44,21 @@ class LLMService:
             )
         except requests.RequestException as exc:
             # 网络错误、超时、连接失败都会走到这里。
+            logger.exception(
+                "llm.request_failed model=%s duration_ms=%.2f",
+                settings.llm_model,
+                (time.perf_counter() - start_time) * 1000,
+            )
             raise LLMServiceError(f"大模型 API 请求失败：{exc}") from exc
 
         if not response.ok:
             # 4xx/5xx 不自动抛异常，需要手动转换成业务错误。
+            logger.warning(
+                "llm.response_error model=%s status=%s duration_ms=%.2f",
+                settings.llm_model,
+                response.status_code,
+                (time.perf_counter() - start_time) * 1000,
+            )
             raise LLMServiceError(self._format_error_response(response))
 
         try:
@@ -51,11 +68,19 @@ class LLMService:
             raise LLMServiceError("大模型 API 返回的不是有效 JSON。") from exc
 
         # 只把回答文本返回给 chat_service，隐藏模型响应的复杂结构。
-        return self._extract_answer(data)
+        answer = self._extract_answer(data)
+        logger.info(
+            "llm.success model=%s duration_ms=%.2f",
+            settings.llm_model,
+            (time.perf_counter() - start_time) * 1000,
+        )
+        return answer
 
     def chat_completion_stream(self, messages: list[dict[str, str]]):
         """流式调用 OpenAI-compatible chat completions，逐步产出文本 chunk。"""
         self._validate_settings()
+        start_time = time.perf_counter()
+        chunk_count = 0
 
         try:
             with requests.post(
@@ -70,6 +95,12 @@ class LLMService:
                 timeout=settings.llm_timeout,
             ) as response:
                 if not response.ok:
+                    logger.warning(
+                        "llm.stream_response_error model=%s status=%s duration_ms=%.2f",
+                        settings.llm_model,
+                        response.status_code,
+                        (time.perf_counter() - start_time) * 1000,
+                    )
                     raise LLMServiceError(self._format_error_response(response))
 
                 # text/event-stream 没有 charset 时，requests 会默认按 ISO-8859-1
@@ -81,8 +112,21 @@ class LLMService:
 
                     chunk = self._extract_stream_chunk(line)
                     if chunk:
+                        chunk_count += 1
                         yield chunk
+                logger.info(
+                    "llm.stream_success model=%s chunks=%s duration_ms=%.2f",
+                    settings.llm_model,
+                    chunk_count,
+                    (time.perf_counter() - start_time) * 1000,
+                )
         except requests.RequestException as exc:
+            logger.exception(
+                "llm.stream_request_failed model=%s chunks=%s duration_ms=%.2f",
+                settings.llm_model,
+                chunk_count,
+                (time.perf_counter() - start_time) * 1000,
+            )
             raise LLMServiceError(f"大模型 API 流式请求失败：{exc}") from exc
 
     def _decode_stream_line(self, raw_line: bytes | str) -> str:

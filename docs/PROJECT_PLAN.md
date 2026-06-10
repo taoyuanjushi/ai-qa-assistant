@@ -13,6 +13,24 @@ MVP 目标：
 4. 前端可以显示 AI 回答；
 5. 后端可以保存聊天记录。
 
+当前已扩展能力：
+1. 普通聊天和流式聊天；
+2. 历史会话列表和会话消息加载；
+3. TXT / Markdown / PDF / DOCX 文档解析；
+4. 单文件和批量上传文档；
+5. Chroma 多文档 RAG 和流式 RAG；
+6. sources 展示；
+7. 删除单个文档；
+8. 清空知识库；
+9. 基于 `document.content` 重建单文档索引；
+10. Rerank 检索重排，优先专业 rerank API，可回退到 LLM/规则 rerank；
+11. 文档摘要缓存和重新生成摘要；
+12. 多文档论文分析结合 document summary 和 reranked sources；
+13. 统一错误响应、请求日志和外部依赖耗时日志；
+14. Docker Compose 基础启动；
+15. GitHub Actions CI；
+16. 后端 pytest 基础测试和前端手动测试清单。
+
 开发原则：
 1. 每次只完成一个小任务；
 2. 修改前先说明计划；

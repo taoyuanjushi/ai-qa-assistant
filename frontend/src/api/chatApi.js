@@ -1,5 +1,5 @@
-const CHAT_API_URL = 'http://127.0.0.1:8001/api/chat'
-const CHAT_STREAM_API_URL = 'http://127.0.0.1:8001/api/chat/stream'
+import { API_BASE_URL } from './config'
+import { getApiErrorMessage } from './errors'
 
 // 前端 API 封装：把 React 层的消息转换成 POST /api/chat 请求。
 export async function sendChatMessage(message, conversationId = null) {
@@ -9,7 +9,7 @@ export async function sendChatMessage(message, conversationId = null) {
   }
 
   // fetch 返回的是 HTTP 响应对象，不会因为 4xx/5xx 自动抛错。
-  const response = await fetch(CHAT_API_URL, {
+  const response = await fetch(`${API_BASE_URL}/chat`, {
     method: 'POST',
     headers: {
       // 告诉 FastAPI 请求体是 JSON，后端才能按 ChatRequest 解析。
@@ -23,7 +23,7 @@ export async function sendChatMessage(message, conversationId = null) {
   const data = await response.json().catch(() => null)
   if (!response.ok) {
     // FastAPI 错误通常放在 detail 字段里，优先展示后端返回的原因。
-    throw new Error(data?.detail || '发送失败，请检查后端服务。')
+    throw new Error(getApiErrorMessage(data, '发送失败，请检查后端服务。'))
   }
 
   if (!data || typeof data.answer !== 'string') {
@@ -47,7 +47,7 @@ export async function sendChatMessageStream(
 ) {
   const body = { message, conversation_id: conversationId }
 
-  const response = await fetch(CHAT_STREAM_API_URL, {
+  const response = await fetch(`${API_BASE_URL}/chat/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -56,8 +56,8 @@ export async function sendChatMessageStream(
   })
 
   if (!response.ok) {
-    const errorText = await response.text().catch(() => '')
-    throw new Error(errorText || '流式请求失败，请检查后端服务。')
+    const errorPayload = await response.json().catch(() => null)
+    throw new Error(getApiErrorMessage(errorPayload, '流式请求失败，请检查后端服务。'))
   }
 
   if (!response.body) {

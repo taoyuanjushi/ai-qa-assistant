@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Any
 
 import requests
@@ -5,6 +7,7 @@ import requests
 from app.core.config import settings
 
 
+logger = logging.getLogger(__name__)
 MAX_EMBEDDING_BATCH_SIZE = 10
 
 
@@ -44,6 +47,7 @@ class EmbeddingService:
 
     def _request_embeddings(self, texts: list[str]) -> list[list[float]]:
         """请求一批 embedding；texts 数量必须不超过 MAX_EMBEDDING_BATCH_SIZE。"""
+        start_time = time.perf_counter()
         try:
             response = requests.post(
                 self._embeddings_url(),
@@ -55,9 +59,22 @@ class EmbeddingService:
                 timeout=settings.llm_timeout,
             )
         except requests.RequestException as exc:
+            logger.exception(
+                "embedding.request_failed model=%s batch_size=%s duration_ms=%.2f",
+                settings.embedding_model,
+                len(texts),
+                (time.perf_counter() - start_time) * 1000,
+            )
             raise EmbeddingServiceError(f"Embedding API 请求失败：{exc}") from exc
 
         if not response.ok:
+            logger.warning(
+                "embedding.response_error model=%s batch_size=%s status=%s duration_ms=%.2f",
+                settings.embedding_model,
+                len(texts),
+                response.status_code,
+                (time.perf_counter() - start_time) * 1000,
+            )
             raise EmbeddingServiceError(self._format_error_response(response))
 
         try:
@@ -65,7 +82,14 @@ class EmbeddingService:
         except ValueError as exc:
             raise EmbeddingServiceError("Embedding API 返回的不是有效 JSON。") from exc
 
-        return self._extract_embeddings(data)
+        embeddings = self._extract_embeddings(data)
+        logger.info(
+            "embedding.success model=%s batch_size=%s duration_ms=%.2f",
+            settings.embedding_model,
+            len(texts),
+            (time.perf_counter() - start_time) * 1000,
+        )
+        return embeddings
 
     def _validate_settings(self) -> None:
         missing = []

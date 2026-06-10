@@ -1,4 +1,5 @@
-const API_BASE_URL = 'http://127.0.0.1:8001/api'
+import { API_BASE_URL } from './config'
+import { getApiErrorMessage } from './errors'
 
 
 async function parseJsonResponse(response, fallbackMessage) {
@@ -6,7 +7,7 @@ async function parseJsonResponse(response, fallbackMessage) {
   const data = await response.json().catch(() => null)
 
   if (!response.ok) {
-    throw new Error(data?.detail || fallbackMessage)
+    throw new Error(getApiErrorMessage(data, fallbackMessage))
   }
 
   return data
@@ -91,6 +92,84 @@ export async function getDocuments() {
 }
 
 
+export async function deleteDocument(documentId) {
+  const response = await fetch(`${API_BASE_URL}/rag/documents/${documentId}`, {
+    method: 'DELETE',
+  })
+
+  // 删除接口会同时清 SQLite 和 Chroma；前端只信任后端返回的 deleted=true。
+  const data = await parseJsonResponse(response, '删除文档失败。')
+  if (
+    typeof data?.document_id !== 'number' ||
+    data.deleted !== true ||
+    typeof data.message !== 'string'
+  ) {
+    throw new Error('后端返回的文档删除结果格式不正确。')
+  }
+
+  return data
+}
+
+
+export async function clearKnowledgeBase() {
+  const response = await fetch(`${API_BASE_URL}/rag/documents`, {
+    method: 'DELETE',
+  })
+
+  // 清空知识库是破坏性操作，调用前的二次确认放在 DocumentToolbar 中处理。
+  const data = await parseJsonResponse(response, '清空知识库失败。')
+  if (
+    typeof data?.deleted_documents !== 'number' ||
+    data.cleared_vector_store !== true ||
+    typeof data.message !== 'string'
+  ) {
+    throw new Error('后端返回的知识库清空结果格式不正确。')
+  }
+
+  return data
+}
+
+
+export async function reindexDocument(documentId) {
+  const response = await fetch(`${API_BASE_URL}/rag/documents/${documentId}/reindex`, {
+    method: 'POST',
+  })
+
+  // 重建索引会返回新的 chunk_count 和 status，ChatPage 用它展示操作结果。
+  const data = await parseJsonResponse(response, '重建文档索引失败。')
+  if (
+    typeof data?.document_id !== 'number' ||
+    typeof data.filename !== 'string' ||
+    typeof data.chunk_count !== 'number' ||
+    typeof data.status !== 'string' ||
+    typeof data.message !== 'string'
+  ) {
+    throw new Error('后端返回的文档重建索引结果格式不正确。')
+  }
+
+  return data
+}
+
+
+export async function regenerateDocumentSummary(documentId) {
+  const response = await fetch(`${API_BASE_URL}/rag/documents/${documentId}/summary/regenerate`, {
+    method: 'POST',
+  })
+
+  const data = await parseJsonResponse(response, '重新生成文档摘要失败。')
+  if (
+    typeof data?.document_id !== 'number' ||
+    typeof data.filename !== 'string' ||
+    typeof data.summary_status !== 'string' ||
+    typeof data.message !== 'string'
+  ) {
+    throw new Error('后端返回的文档摘要结果格式不正确。')
+  }
+
+  return data
+}
+
+
 export async function ragChat({
   question,
   document_id = null,
@@ -150,7 +229,7 @@ export async function ragChatStream({
 
   if (!response.ok) {
     const data = await response.json().catch(() => null)
-    throw new Error(data?.detail || '流式文档问答失败。')
+    throw new Error(getApiErrorMessage(data, '流式文档问答失败。'))
   }
 
   if (!response.body) {
@@ -201,6 +280,7 @@ export async function ragChatStream({
       break
     }
 
+    // NDJSON 可能被网络分成半行返回，buffer 保存尚未凑完整的一行 JSON。
     buffer += decoder.decode(value, { stream: true })
     const lines = buffer.split('\n')
     buffer = lines.pop() || ''

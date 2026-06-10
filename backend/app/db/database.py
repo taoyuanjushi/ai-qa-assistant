@@ -5,10 +5,20 @@ from pathlib import Path
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
+from app.core.config import BACKEND_DIR, settings
+
 
 # SQLite 文件固定放在 backend/app.db，便于本地运行和排查数据。
-BACKEND_DIR = Path(__file__).resolve().parents[2]
-DATABASE_PATH = BACKEND_DIR / "app.db"
+def _database_path() -> Path:
+    path = Path(settings.database_path)
+    if path.is_absolute():
+        return path
+
+    return BACKEND_DIR / path
+
+
+DATABASE_PATH = _database_path()
+DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 
 # FastAPI 可能在不同线程中处理请求，SQLite 连接需要关闭同线程检查。
@@ -77,8 +87,14 @@ class Document(Base):
     file_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     chroma_collection: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # content 是旧版 RAG 遗留字段；新版 Chroma RAG 不再依赖它保存全文。
+    # status 只描述索引维护状态：ready / reindexing / failed。
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready")
+    # 保存解析后的纯文本，供后续重建索引时重新切分和生成 embedding。
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # summary 用于多文档论文分析的全局视角；不会替代 Chroma sources。
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_status: Mapped[str | None] = mapped_column(String(20), nullable=True, default="pending")
+    summary_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -133,6 +149,33 @@ def _ensure_document_metadata_columns() -> None:
             connection.execute(
                 text("ALTER TABLE document ADD COLUMN chroma_collection VARCHAR(100)")
             )
+        if "status" not in columns:
+            connection.execute(
+                text("ALTER TABLE document ADD COLUMN status VARCHAR(20) DEFAULT 'ready' NOT NULL")
+            )
+        else:
+            connection.execute(
+                text("UPDATE document SET status = 'ready' WHERE status IS NULL OR status = ''")
+            )
+        if "content" not in columns:
+            connection.execute(
+                text("ALTER TABLE document ADD COLUMN content TEXT DEFAULT '' NOT NULL")
+            )
+        if "summary" not in columns:
+            connection.execute(text("ALTER TABLE document ADD COLUMN summary TEXT"))
+        if "summary_status" not in columns:
+            connection.execute(
+                text("ALTER TABLE document ADD COLUMN summary_status VARCHAR(20) DEFAULT 'pending'")
+            )
+        else:
+            connection.execute(
+                text(
+                    "UPDATE document SET summary_status = 'pending' "
+                    "WHERE summary_status IS NULL OR summary_status = ''"
+                )
+            )
+        if "summary_updated_at" not in columns:
+            connection.execute(text("ALTER TABLE document ADD COLUMN summary_updated_at DATETIME"))
 
 
 def _ensure_legacy_document_chunk_embedding_columns() -> None:

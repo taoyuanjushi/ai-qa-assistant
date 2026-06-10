@@ -15,6 +15,9 @@ export default function SourceList({ sources = [] }) {
           <div className="source-item__meta">
             {source.filename} [{formatFileType(source.file_type)}] · Chunk #
             {source.chunk_index} · score {formatScore(source.score)}
+            {source.rerank_score !== null && source.rerank_score !== undefined
+              ? ` · rerank ${formatScore(source.rerank_score)}`
+              : ''}
           </div>
           <p>{source.content}</p>
         </article>
